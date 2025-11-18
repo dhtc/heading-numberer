@@ -1,0 +1,4 @@
+.heading-numberer-setting { margin: 12px 0; padding: 8px 0; border-bottom: 1px solid var(--background-modifier-border); }
+.heading-numberer-setting:last-child { border-bottom: none; }
+.heading-numberer-level-setting { display: flex; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.heading-numberer-level-label { font-weight: bold; min-width: 60px; margin-right: 12px; }
