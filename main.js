@@ -38,7 +38,7 @@ const HeadingCorrector = class {
                     const { level, prefix, text: headingText, suffix, originalNumber } = heading;
                     this.updateCounters(counters, level);
                     const formattedNumber = this.generateFormattedNumber(counters, level, settings);
-                    const newTitle = this.rebuildHeading(level, prefix, headingText, suffix, formattedNumber, originalNumber);
+                    const newTitle = this.rebuildHeading(level, prefix, headingText, suffix, formattedNumber, originalNumber, settings);
                     result.push(newTitle);
                     continue;
                 }
@@ -59,7 +59,6 @@ const HeadingCorrector = class {
 
         let prefix = '', text = '', suffix = '', i = 0, len = content.length;
 
-        // Prefix: **, __, <tag>, `
         while (i < len) {
             if (i + 1 < len && (content[i] === '*' || content[i] === '_') && content[i] === content[i+1]) {
                 prefix += content[i] + content[i+1]; i += 2; continue;
@@ -70,7 +69,6 @@ const HeadingCorrector = class {
             break;
         }
 
-        // Suffix: from end
         let j = len - 1;
         while (j >= i) {
             if (j - 1 >= i && (content[j] === '*' || content[j] === '_') && content[j] === content[j-1]) {
@@ -83,8 +81,6 @@ const HeadingCorrector = class {
         }
 
         text = content.slice(i, j + 1).trim();
-
-        // ➕ Attempt to strip existing numbering from `text`
         const { cleanText, strippedNumber } = this.stripExistingNumber(text);
         
         return { 
@@ -96,22 +92,13 @@ const HeadingCorrector = class {
         };
     }
 
-    // ➕ Strip existing numbering prefix (e.g., "二、", "3.", "（1）", etc.)
     stripExistingNumber(text) {
+        const punctuation = '[\\s、.,。，．）)]';
         const patterns = [
-            // Chinese with punctuation: 一、 二. 三） 第一章 第一条
-            /^第[零一二三四五六七八九十百千]+[章节条款目]\s*/,
-            /^([零一二三四五六七八九十百千]+)[、.．\s)]+\s*/,
-            // Arabic: 1. 2) (3) （4）
-            /^(\d+)[、.．\s)]+\s*/,
-            /^\((\d+)\)\s*/,
-            /^（(\d+)）\s*/,
-            // Circled numbers
-            /^[①-⑳❶-❿➀-➓]\s*/,
-            // Roman numerals (lower/upper)
-            /^([ivx]+|[IVX]+)[.．\s)]+\s*/,
-            // Alphabet (lower/upper)
-            /^([a-zA-Z]+)[.．\s)]+\s*/,
+            new RegExp(`^第[零一二三四五六七八九十百千]+[章节条款目]${punctuation}*`, 'u'),
+            new RegExp(`^([零一二三四五六七八九十百千]+|\\d+|[ivxIVX]+|[a-zA-Z]+|[①-⑳❶-❿➀-➓])${punctuation}+`, 'u'),
+            /^\(\d+\)\s*/,
+            /^（\d+）\s*/,
         ];
 
         for (const pattern of patterns) {
@@ -130,6 +117,12 @@ const HeadingCorrector = class {
     }
 
     generateFormattedNumber(counters, level, settings) {
+        const currentLevelKey = `level${level}`;
+        const currentCfg = settings[currentLevelKey];
+        if (currentCfg?.format === 'none') {
+            return '';
+        }
+
         const onlyLast = settings.onlyLastLevel;
         let parts = [];
 
@@ -146,27 +139,28 @@ const HeadingCorrector = class {
         const fmt = settings[`level${level}`]?.format || '';
         const isChapter = /chapter|section|subsection/.test(fmt);
         const num = onlyLast && (parts.length > 1 || isChapter) ? parts[parts.length-1] : parts.join('.');
-        return num + (settings[`level${level}`]?.separator || '');
+        return num;
     }
 
-    rebuildHeading(level, prefix, text, suffix, num, originalNumber) {
+    rebuildHeading(level, prefix, text, suffix, num, originalNumber, settings) {
         let line = '#'.repeat(level) + ' ';
-        
-        // ➕ If original numbering was inside text (e.g., <strong>二、...</strong>),
-        // put new number inside formatting tags (i.e., at start of `text`)
-        if (originalNumber !== null && num) {
-            text = num + ' ' + text;
-            line += prefix + text + suffix;
+        const separator = settings?.[`level${level}`]?.separator || '';
+
+        if (num === '') {
+            const { cleanText } = this.stripExistingNumber(text);
+            line += prefix + cleanText + suffix;
         } else {
-            line += prefix;
-            if (num) line += num + ' ';
-            line += text + suffix;
+            if (originalNumber !== null) {
+                text = num + separator + text;
+                line += prefix + text + suffix;
+            } else {
+                line += prefix + num + separator + text + suffix;
+            }
         }
-        
+
         return line;
     }
 
-    // --- Utils ---
     toChineseNumber(n) {
         if (n <= 0) return '零';
         if (n > 9999) return n.toString();
@@ -225,7 +219,15 @@ module.exports = class HeadingNumberer extends Plugin {
         this.corrector = new HeadingCorrector();
         await this.loadSettings();
 
-        // Commands
+        this.styleEl = document.createElement('style');
+        this.styleEl.textContent = `
+            .HN-empty-sep {
+                color: var(--text-faint) !important;
+                font-style: italic;
+            }
+        `;
+        document.head.appendChild(this.styleEl);
+
         this.addCommand({
             id: 'correct-headings-preview',
             name: '✔️ Correct Headings (Preview)',
@@ -245,14 +247,12 @@ module.exports = class HeadingNumberer extends Plugin {
             callback: () => this.removeAllNumbers()
         });
 
-        // UI elements
         this.addRibbonIcon('hash', 'Correct Headings', () => this.correctCurrentFile());
         
         const statusBarItem = this.addStatusBarItem();
         statusBarItem.setText('HN');
         statusBarItem.onClickEvent(() => this.correctCurrentFile());
 
-        // Context menu
         this.registerEvent(
             this.app.workspace.on('file-menu', (menu, file) => {
                 if (file instanceof TFile && file.extension === 'md') {
@@ -265,11 +265,12 @@ module.exports = class HeadingNumberer extends Plugin {
             })
         );
 
-        // Settings tab
         this.addSettingTab(new HeadingNumbererSettingTab(this.app, this));
     }
 
-    onunload() {}
+    onunload() {
+        if (this.styleEl?.parentNode) this.styleEl.parentNode.removeChild(this.styleEl);
+    }
 
     async loadSettings() {
         this.settings = Object.assign(this.getDefaultSettings(), await this.loadData());
@@ -287,8 +288,8 @@ module.exports = class HeadingNumberer extends Plugin {
         return {
             onlyLastLevel: false,
             level1: { format: 'chapter-chinese', separator: '' },
-            level2: { format: 'section-chinese', separator: '' },
-            level3: { format: 'decimal-paren', separator: '' },
+            level2: { format: 'section-chinese', separator: '、' },
+            level3: { format: 'decimal-paren', separator: ' ' },
             level4: { format: 'none', separator: '' },
             level5: { format: 'none', separator: '' },
             level6: { format: 'none', separator: '' }
@@ -365,7 +366,6 @@ module.exports = class HeadingNumberer extends Plugin {
     }
 };
 
-// --- Settings Tab ---
 class HeadingNumbererSettingTab extends PluginSettingTab {
     constructor(app, plugin) {
         super(app, plugin);
@@ -378,7 +378,6 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
 
         containerEl.createEl('h2', { text: 'Heading Numberer' });
 
-        // Global option
         new Setting(containerEl)
             .setName('📌 Only Last Level Number')
             .setDesc('e.g., "### 第一章.第一条.第一款" → "### 第一款"')
@@ -390,7 +389,6 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
                     })
             );
 
-        // Options list (flattened with visual grouping)
         const options = [
             { value: 'none', label: '(None)', group: 'None' },
             { value: 'decimal', label: '1, 2, 3', group: 'Basic' },
@@ -408,7 +406,6 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
             { value: 'subsection-chinese', label: '第一条, 第二条', group: 'Legal/GB' },
         ];
 
-        // Visually group options with disabled separators
         const groupedOptions = [];
         let lastGroup = '';
         options.forEach(opt => {
@@ -423,7 +420,6 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
             groupedOptions.push(opt);
         });
 
-        // Level settings
         for (let level = 1; level <= 6; level++) {
             const key = `level${level}`;
             new Setting(containerEl)
@@ -432,8 +428,8 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
                     groupedOptions.forEach(opt => {
                         dropdown.addOption(opt.value, opt.label);
                         if (opt.isDisabled) {
-                            const optionEl = dropdown.selectEl.querySelector(`option[value="${opt.value}"]`);
-                            if (optionEl) optionEl.disabled = true;
+                            const el = dropdown.selectEl.querySelector(`option[value="${opt.value}"]`);
+                            if (el) el.disabled = true;
                         }
                     });
 
@@ -444,45 +440,45 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
                             await this.plugin.saveSettings();
                         });
                 })
-                .addText(text => 
-                    text
-                        .setPlaceholder('e.g., . or ∅')
-                        .setValue(
-                            this.plugin.settings[key].separator === '' 
-                                ? '∅' 
-                                : this.plugin.settings[key].separator
-                        )
-                        .onChange(async (rawValue) => {
-                            // Normalize input: ∅, null, empty, space-only → ""
-                            let normalized = rawValue.trim();
-                            if (normalized === '' || normalized === '∅' || normalized === 'null') {
-                                normalized = '';
-                            }
-                            this.plugin.settings[key].separator = normalized;
-                            await this.plugin.saveSettings();
+                .addText(text => {
+                    const displayVal = this.plugin.settings[key].separator === '' ? '∅' : this.plugin.settings[key].separator;
+                    text.setValue(displayVal);
 
-                            // Optional: auto-reset display to ∅ if cleared
-                            if (normalized === '') {
-                                text.inputEl.value = '∅';
-                                text.inputEl.classList.add('HN-empty-sep');
-                            } else {
-                                text.inputEl.classList.remove('HN-empty-sep');
-                            }
-                        })
-                        .inputEl.addEventListener('focus', () => {
-                            if (text.inputEl.value === '∅') {
-                                text.inputEl.value = '';
-                                text.inputEl.classList.remove('HN-empty-sep');
-                            }
-                        }, { once: true })
-                )
-            .setDesc('Separator after number (e.g., ".", " ", or ∅ for none)')
+                    const update = (raw) => {
+                        // ✅ FIXED: Preserve spaces; only clear ∅, null, or empty
+                        let val = raw;
+                        if (val === '∅' || val === 'null' || val === '') {
+                            val = '';
+                        }
+                        this.plugin.settings[key].separator = val;
+                        this.plugin.saveSettings();
+
+                        if (val === '') {
+                            text.setValue('∅');
+                            text.inputEl.classList.add('HN-empty-sep');
+                        } else {
+                            text.setValue(val);
+                            text.inputEl.classList.remove('HN-empty-sep');
+                        }
+                    };
+
+                    text.onChange(update);
+
+                    const onFocus = () => {
+                        if (text.inputEl.value === '∅') {
+                            text.inputEl.value = '';
+                            text.inputEl.classList.remove('HN-empty-sep');
+                        }
+                        text.inputEl.removeEventListener('focus', onFocus);
+                    };
+                    text.inputEl.addEventListener('focus', onFocus);
+                })
+                .setDesc('Separator after number (e.g., "、", ".", " ", or ∅ for none)');
         }
 
-        // Reset button
         new Setting(containerEl)
             .setName('🔄 Reset to Defaults')
-            .setDesc('Restore recommended GB/T 1.1 settings')
+            .setDesc('H2 uses "、" for Chinese style')
             .addButton(button => 
                 button
                     .setButtonText('Reset')
@@ -491,7 +487,7 @@ class HeadingNumbererSettingTab extends PluginSettingTab {
                         this.plugin.loadDefaultSettings();
                         await this.plugin.saveSettings();
                         this.display();
-                        new Notice('✅ Settings reset to defaults');
+                        new Notice('✅ Reset: H2 separator = "、"');
                     })
             );
     }
